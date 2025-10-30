@@ -1,0 +1,2 @@
+test-demo/clean-project
+test-demo/infected-project
