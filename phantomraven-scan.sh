@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # PhantomRaven Scanner
-# Universal scanner for single projects or mass repository scanning
+# Security-focused scanner for PhantomRaven npm malware detection
 # Detects PhantomRaven npm malware and Remote Dynamic Dependencies
 
 set -euo pipefail
@@ -12,16 +12,10 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # Configuration
-MODE="single"  # single or batch
-WORKERS=4
-OUTPUT_FORMAT="text"  # text, json, csv
-OUTPUT_FILE=""
 VERBOSE=0
-SUMMARY_ONLY=0
 
 # Known malicious packages (126 packages from PhantomRaven campaign)
 MALICIOUS_PACKAGES=(
@@ -75,28 +69,15 @@ MALICIOUS_IP="54.173.15.59"
 
 show_help() {
     cat << EOF
-PhantomRaven Scanner - Universal npm Malware Detector
+PhantomRaven Scanner - npm Malware Detector
 
 USAGE:
-  Single project:  $0 [OPTIONS] [path]
-  Batch mode:      $0 --batch [OPTIONS] <repos_dir|repos_list>
-
-MODES:
-  Single (default)  Scan one project directory
-  Batch (--batch)   Scan multiple repositories in parallel
+  $0 [OPTIONS] [path]
 
 OPTIONS:
   -v, --verbose         Show detailed information
   -h, --help            Show this help message
-
-  Single mode options:
-    [path]              Path to scan (default: current directory)
-
-  Batch mode options:
-    -w, --workers N     Number of parallel workers (default: 4)
-    -f, --format FMT    Output format: text, json, csv (default: text)
-    -o, --output FILE   Save results to file
-    --summary-only      Show only final summary
+  [path]                Path to scan (default: current directory)
 
 WHAT IT CHECKS:
   • 126 known PhantomRaven malicious packages
@@ -116,15 +97,6 @@ EXAMPLES:
   # Verbose scan
   $0 -v ~/my-app
 
-  # Batch: Scan all repos in directory with 8 workers
-  $0 --batch -w 8 ~/projects
-
-  # Batch: Generate JSON report
-  $0 --batch -f json -o report.json ~/workspace
-
-  # Batch: Scan from list file
-  $0 --batch repos.txt
-
 EXIT CODES:
   0 - Clean (no issues found)
   1 - Infected (malware detected)
@@ -137,35 +109,46 @@ EOF
     exit 0
 }
 
+# Validate and sanitize path
+validate_path() {
+    local path="$1"
+
+    # Resolve to absolute path and remove symlinks
+    if ! path=$(realpath "$path" 2>/dev/null); then
+        echo -e "${RED}Error: Invalid path${NC}" >&2
+        return 1
+    fi
+
+    # Check if directory exists
+    if [ ! -d "$path" ]; then
+        echo -e "${RED}Error: Directory does not exist: $path${NC}" >&2
+        return 1
+    fi
+
+    # Prevent scanning sensitive system directories
+    case "$path" in
+        /|/bin|/sbin|/usr|/etc|/var|/sys|/proc|/dev|/boot)
+            echo -e "${RED}Error: Cannot scan system directory: $path${NC}" >&2
+            return 1
+            ;;
+    esac
+
+    echo "$path"
+}
+
 # Parse arguments
 SCAN_TARGET=""
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --batch)
-            MODE="batch"
-            shift
-            ;;
-        -w|--workers)
-            WORKERS="$2"
-            shift 2
-            ;;
-        -f|--format)
-            OUTPUT_FORMAT="$2"
-            shift 2
-            ;;
-        -o|--output)
-            OUTPUT_FILE="$2"
-            shift 2
-            ;;
         -v|--verbose)
             VERBOSE=1
             shift
             ;;
-        --summary-only)
-            SUMMARY_ONLY=1
-            shift
-            ;;
         -h|--help)
+            show_help
+            ;;
+        -*)
+            echo -e "${RED}Unknown option: $1${NC}"
             show_help
             ;;
         *)
@@ -178,9 +161,10 @@ done
 # Default scan target
 [ -z "$SCAN_TARGET" ] && SCAN_TARGET="."
 
-#############################################################################
-# SINGLE PROJECT MODE
-#############################################################################
+# Validate path
+if ! SCAN_TARGET=$(validate_path "$SCAN_TARGET"); then
+    exit 2
+fi
 
 # Check malicious packages in file
 # Returns 0 if clean, 1 if found issues
@@ -190,7 +174,8 @@ check_malicious_packages() {
     local found=0
 
     for pkg in "${MALICIOUS_PACKAGES[@]}"; do
-        if grep -q "\"$pkg\"" "$file" 2>/dev/null; then
+        # Use -F for literal string matching (no regex) - security fix
+        if grep -qF "\"$pkg\"" "$file" 2>/dev/null; then
             if [ -n "$label" ]; then
                 echo -e "${RED}  ✗ Malicious package in $label: ${YELLOW}$pkg${NC}"
             else
@@ -273,7 +258,7 @@ check_install_scripts() {
 }
 
 # Scan a single project
-scan_single_project() {
+scan_project() {
     local scan_dir="$1"
     local has_issues=0
 
@@ -327,7 +312,8 @@ scan_single_project() {
 
             ! check_malicious_packages "$lock_file" "$lock" && project_has_issues=1
 
-            if grep -q "$MALICIOUS_DOMAIN" "$lock_file" 2>/dev/null; then
+            # Use -F for literal string matching - security fix
+            if grep -qF "$MALICIOUS_DOMAIN" "$lock_file" 2>/dev/null; then
                 echo -e "${RED}  ✗ Malicious domain in $lock: ${YELLOW}$MALICIOUS_DOMAIN${NC}"
                 project_has_issues=1
             fi
@@ -362,278 +348,5 @@ scan_single_project() {
     fi
 }
 
-#############################################################################
-# BATCH MODE
-#############################################################################
-
-# Statistics
-TOTAL_REPOS=0
-SCANNED_REPOS=0
-INFECTED_REPOS=0
-CLEAN_REPOS=0
-ERROR_REPOS=0
-START_TIME=$(date +%s)
-
-INFECTED_LIST=()
-CLEAN_LIST=()
-ERROR_LIST=()
-FINDINGS_FILE=""
-
-# Discover repositories from directory or list file
-discover_repos() {
-    local input="$1"
-    local repos=()
-
-    if [ -f "$input" ]; then
-        echo -e "${CYAN}Reading repository list from: $input${NC}" >&2
-        while IFS= read -r line; do
-            line=$(echo "$line" | xargs)
-            [ -z "$line" ] && continue
-            [ "${line:0:1}" = "#" ] && continue
-            [ -d "$line" ] && repos+=("$line")
-        done < "$input"
-    elif [ -d "$input" ]; then
-        echo -e "${CYAN}Discovering git repositories in: $input${NC}" >&2
-        while IFS= read -r -d '' repo; do
-            repos+=("$repo")
-        done < <(find "$input" -maxdepth 3 -name ".git" -type d -print0 2>/dev/null | xargs -0 -I {} dirname {})
-    fi
-
-    # Output repos if any found
-    if [ ${#repos[@]} -gt 0 ]; then
-        printf '%s\n' "${repos[@]}"
-    fi
-}
-
-# Scan repository in worker process
-scan_repo_worker() {
-    local repo="$1"
-    local worker_id="$2"
-    local temp_dir="$3"
-
-    local status="clean"
-    local exit_code=0
-    local findings=""
-
-    # Create a temporary script to scan this repo
-    if output=$(bash "$0" "$repo" 2>&1); then
-        exit_code=$?
-        [ $exit_code -ne 0 ] && status="infected"
-    else
-        exit_code=$?
-        status="error"
-        findings="Scan failed with exit code $exit_code"
-    fi
-
-    # Extract findings from output
-    if [ "$status" = "infected" ]; then
-        findings=$(echo "$output" | grep -E "✗|⚠" | head -3 | tr '\n' '; ' | sed 's/[|]/_/g')
-    fi
-
-    # Write result (escape pipe characters in findings)
-    echo "REPO|$repo|$status|$exit_code|$findings" >> "$temp_dir/result_${worker_id}.txt"
-
-    # Show output if verbose
-    if [ $VERBOSE -eq 1 ]; then
-        echo -e "\n${BLUE}=== $(basename "$repo") ===${NC}"
-        echo "$output"
-    fi
-}
-
-# Process repos in parallel
-process_batch() {
-    local -a repos=("$@")
-    TOTAL_REPOS=${#repos[@]}
-
-    [ $TOTAL_REPOS -eq 0 ] && return
-
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "${BLUE}PhantomRaven Batch Scanner${NC}"
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "Total repositories: ${GREEN}$TOTAL_REPOS${NC}"
-    echo -e "Parallel workers: ${CYAN}$WORKERS${NC}"
-    echo ""
-
-    [ $SUMMARY_ONLY -eq 1 ] && echo -e "${CYAN}Summary-only mode${NC}\n"
-
-    # Create temp directory
-    local temp_dir=$(mktemp -d -t phantomraven.XXXXXX)
-    trap "rm -rf $temp_dir" EXIT
-
-    # Create queue
-    local queue="$temp_dir/queue.txt"
-    printf '%s\n' "${repos[@]}" > "$queue"
-
-    # Launch workers
-    local pids=()
-    for worker_id in $(seq 1 $WORKERS); do
-        (
-            while true; do
-                repo=$(flock "$queue" sh -c "head -n 1 '$queue'; sed -i.bak '1d' '$queue'" 2>/dev/null)
-                [ -z "$repo" ] && break
-
-                scan_repo_worker "$repo" "$worker_id" "$temp_dir"
-
-                if [ $SUMMARY_ONLY -eq 0 ]; then
-                    scanned=$(cat "$temp_dir"/result_*.txt 2>/dev/null | wc -l)
-                    echo -e "${CYAN}Progress: [$scanned/$TOTAL_REPOS]${NC} $(basename "$repo")"
-                fi
-            done
-        ) &
-        pids+=($!)
-    done
-
-    # Wait for all workers
-    for pid in "${pids[@]}"; do
-        wait $pid
-    done
-
-    # Aggregate results
-    FINDINGS_FILE="$temp_dir/findings.txt"
-    > "$FINDINGS_FILE"  # Create empty file
-
-    for result_file in "$temp_dir"/result_*.txt; do
-        [ ! -f "$result_file" ] && continue
-
-        while IFS='|' read -r prefix repo status exit_code findings; do
-            [ "$prefix" != "REPO" ] && continue
-
-            SCANNED_REPOS=$((SCANNED_REPOS + 1))
-
-            case "$status" in
-                clean)
-                    CLEAN_REPOS=$((CLEAN_REPOS + 1))
-                    CLEAN_LIST+=("$repo")
-                    ;;
-                infected)
-                    INFECTED_REPOS=$((INFECTED_REPOS + 1))
-                    INFECTED_LIST+=("$repo")
-                    echo "$repo|$findings" >> "$FINDINGS_FILE"
-                    ;;
-                error)
-                    ERROR_REPOS=$((ERROR_REPOS + 1))
-                    ERROR_LIST+=("$repo")
-                    echo "$repo|$findings" >> "$FINDINGS_FILE"
-                    ;;
-            esac
-        done < "$result_file"
-    done
-}
-
-# Generate reports
-generate_text_report() {
-    local duration=$(($(date +%s) - START_TIME))
-
-    echo -e "\n${BLUE}================================================${NC}"
-    echo -e "${BLUE}Scan Summary${NC}"
-    echo -e "${BLUE}================================================${NC}"
-    echo -e "Scanned: ${GREEN}$SCANNED_REPOS${NC} | Clean: ${GREEN}$CLEAN_REPOS${NC} | Infected: ${RED}$INFECTED_REPOS${NC} | Errors: ${YELLOW}$ERROR_REPOS${NC}"
-    echo -e "Duration: ${CYAN}${duration}s${NC}\n"
-
-    if [ $INFECTED_REPOS -gt 0 ]; then
-        echo -e "${RED}⚠ INFECTED REPOSITORIES:${NC}"
-        for repo in "${INFECTED_LIST[@]}"; do
-            echo -e "  ${RED}✗${NC} $repo"
-            # Look up findings for this repo
-            if [ -f "$FINDINGS_FILE" ]; then
-                findings=$(grep "^$repo|" "$FINDINGS_FILE" | cut -d'|' -f2-)
-                [ -n "$findings" ] && echo -e "    ${YELLOW}$findings${NC}"
-            fi
-        done
-        echo ""
-    fi
-
-    [ $ERROR_REPOS -gt 0 ] && echo -e "${YELLOW}Errors: $ERROR_REPOS repositories${NC}\n"
-
-    if [ $INFECTED_REPOS -gt 0 ]; then
-        echo -e "${RED}ACTION REQUIRED!${NC}"
-        echo -e "Review infected repositories and follow remediation steps"
-    else
-        echo -e "${GREEN}✓ All repositories are clean!${NC}"
-    fi
-}
-
-generate_json_report() {
-    local json='{'
-    json+="\"scan_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
-    json+="\"total\":$SCANNED_REPOS,"
-    json+="\"clean\":$CLEAN_REPOS,"
-    json+="\"infected\":$INFECTED_REPOS,"
-    json+="\"errors\":$ERROR_REPOS,"
-    json+="\"duration_seconds\":$(($(date +%s) - START_TIME)),"
-
-    json+="\"infected_repositories\":["
-    local first=1
-    for repo in "${INFECTED_LIST[@]}"; do
-        [ $first -eq 0 ] && json+=","
-        first=0
-        local findings=""
-        [ -f "$FINDINGS_FILE" ] && findings=$(grep "^$repo|" "$FINDINGS_FILE" | cut -d'|' -f2-)
-        json+="{\"path\":\"$repo\",\"findings\":\"${findings:-}\"}"
-    done
-    json+="]"
-
-    json+='}'
-    echo "$json"
-}
-
-generate_csv_report() {
-    echo "Repository,Status,Findings"
-    for repo in "${CLEAN_LIST[@]}"; do
-        echo "\"$repo\",clean,\"\""
-    done
-    for repo in "${INFECTED_LIST[@]}"; do
-        local findings=""
-        [ -f "$FINDINGS_FILE" ] && findings=$(grep "^$repo|" "$FINDINGS_FILE" | cut -d'|' -f2-)
-        echo "\"$repo\",infected,\"${findings//\"/\\\"}\""
-    done
-    for repo in "${ERROR_LIST[@]}"; do
-        local error=""
-        [ -f "$FINDINGS_FILE" ] && error=$(grep "^$repo|" "$FINDINGS_FILE" | cut -d'|' -f2-)
-        echo "\"$repo\",error,\"${error//\"/\\\"}\""
-    done
-}
-
-#############################################################################
-# MAIN
-#############################################################################
-
-if [ "$MODE" = "single" ]; then
-    scan_single_project "$SCAN_TARGET"
-else
-    # Batch mode
-    REPOS=()
-    while IFS= read -r repo; do
-        REPOS+=("$repo")
-    done < <(discover_repos "$SCAN_TARGET")
-
-    if [ ${#REPOS[@]} -eq 0 ]; then
-        echo -e "${YELLOW}No repositories found${NC}"
-        exit 0
-    fi
-
-    process_batch "${REPOS[@]}"
-
-    # Generate report
-    case "$OUTPUT_FORMAT" in
-        json) report=$(generate_json_report) ;;
-        csv) report=$(generate_csv_report) ;;
-        *) report=$(generate_text_report) ;;
-    esac
-
-    # Output
-    if [ -n "$OUTPUT_FILE" ]; then
-        if [ "$OUTPUT_FORMAT" = "text" ]; then
-            echo -e "$report" | sed 's/\x1b\[[0-9;]*m//g' > "$OUTPUT_FILE"
-        else
-            echo "$report" > "$OUTPUT_FILE"
-        fi
-        echo -e "${GREEN}Report saved: $OUTPUT_FILE${NC}"
-    fi
-
-    echo -e "$report"
-
-    [ $INFECTED_REPOS -gt 0 ] && exit 1
-    [ $ERROR_REPOS -gt 0 ] && exit 2
-    exit 0
-fi
+# Main
+scan_project "$SCAN_TARGET"
