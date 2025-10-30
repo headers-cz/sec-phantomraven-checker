@@ -173,9 +173,36 @@ check_malicious_packages() {
     local label="${2:-}"
     local found=0
 
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ⚠ Warning: jq not installed, using fallback grep method${NC}" >&2
+        # Fallback to grep
+        for pkg in "${MALICIOUS_PACKAGES[@]}"; do
+            if grep -qF "\"$pkg\"" "$file" 2>/dev/null; then
+                if [ -n "$label" ]; then
+                    echo -e "${RED}  ✗ Malicious package in $label: ${YELLOW}$pkg${NC}"
+                else
+                    echo -e "${RED}  ✗ Malicious package: ${YELLOW}$pkg${NC}"
+                fi
+                found=1
+            fi
+        done
+        return $found
+    fi
+
+    # Use jq to properly parse JSON and extract all dependency names
+    local all_deps
+    all_deps=$(jq -r '
+        [
+            (.dependencies // {} | keys[]),
+            (.devDependencies // {} | keys[]),
+            (.optionalDependencies // {} | keys[])
+        ] | .[]
+    ' "$file" 2>/dev/null) || return 0
+
+    # Check each extracted package name against malicious list
     for pkg in "${MALICIOUS_PACKAGES[@]}"; do
-        # Use -F for literal string matching (no regex) - security fix
-        if grep -qF "\"$pkg\"" "$file" 2>/dev/null; then
+        if echo "$all_deps" | grep -qFx "$pkg"; then
             if [ -n "$label" ]; then
                 echo -e "${RED}  ✗ Malicious package in $label: ${YELLOW}$pkg${NC}"
             else
@@ -194,31 +221,67 @@ check_remote_dependencies() {
     local file="$1"
     local found=0
 
-    if grep -qE "\"dependencies\"|\"devDependencies\"|\"optionalDependencies\"" "$file" 2>/dev/null; then
-        # Check HTTP/HTTPS URLs
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ⚠ Warning: jq not installed, using fallback grep method${NC}" >&2
+        # Fallback to grep with limited capabilities
         while IFS= read -r line; do
             if [[ $line =~ \"(https?://[^\"]+)\" ]]; then
                 url="${BASH_REMATCH[1]}"
                 echo -e "${RED}  ✗ Remote Dynamic Dependency: ${YELLOW}$url${NC}"
                 found=1
-
                 if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
                     echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
                 fi
             fi
         done < <(grep -A 20 -E "\"dependencies\"|\"devDependencies\"|\"optionalDependencies\"" "$file" 2>/dev/null | grep -E "https?://" || true)
-
-        # Check Git URLs (skip known safe hosts)
-        while IFS= read -r line; do
-            if [[ $line =~ \"(git(\+https?|\+ssh)?://[^\"]+)\" ]]; then
-                url="${BASH_REMATCH[1]}"
-                if [[ ! $url =~ (github\.com|gitlab\.com|bitbucket\.org) ]]; then
-                    echo -e "${YELLOW}  ⚠ Suspicious git dependency: ${CYAN}$url${NC}"
-                    found=1
-                fi
-            fi
-        done < <(grep -A 20 -E "\"dependencies\"|\"devDependencies\"|\"optionalDependencies\"" "$file" 2>/dev/null | grep -E "git(\+https?|\+ssh)?://" || true)
+        return $found
     fi
+
+    # Use jq to extract all dependency values from all dependency sections
+    local dep_values
+    dep_values=$(jq -r '
+        [
+            (.dependencies // {} | to_entries[] | .value),
+            (.devDependencies // {} | to_entries[] | .value),
+            (.optionalDependencies // {} | to_entries[] | .value)
+        ] | .[]
+    ' "$file" 2>/dev/null) || return 0
+
+    # Check each dependency value for HTTP/HTTPS URLs
+    while IFS= read -r value; do
+        [ -z "$value" ] && continue
+
+        # Check for HTTP/HTTPS URLs (Remote Dynamic Dependencies)
+        if [[ $value =~ (https?://[^[:space:]\"]+) ]]; then
+            url="${BASH_REMATCH[1]}"
+
+            # Whitelist legitimate sources
+            if [[ $url =~ registry\.npmjs\.org ]]; then
+                # Official npm registry - safe
+                continue
+            elif [[ $url =~ github\.com/[^/]+/[^/]+/(tarball|zipball) ]]; then
+                # GitHub tarball/zipball - common and safe
+                continue
+            fi
+
+            echo -e "${RED}  ✗ Remote Dynamic Dependency: ${YELLOW}$url${NC}"
+            found=1
+
+            if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
+                echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
+            fi
+        fi
+
+        # Check for Git URLs (skip known safe hosts)
+        if [[ $value =~ (git(\+https?|\+ssh)?://[^[:space:]\"]+) ]]; then
+            url="${BASH_REMATCH[1]}"
+            if [[ ! $url =~ (github\.com|gitlab\.com|bitbucket\.org) ]]; then
+                echo -e "${YELLOW}  ⚠ Suspicious git dependency: ${CYAN}$url${NC}"
+                found=1
+            fi
+        fi
+    done <<< "$dep_values"
 
     return $found
 }
@@ -238,19 +301,46 @@ check_install_scripts() {
         "chmod.*\+x.*&&"
     )
 
-    for script_type in "preinstall" "postinstall" "install"; do
-        if script_content=$(grep -o "\"$script_type\":[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null); then
-            for pattern in "${patterns[@]}"; do
-                if echo "$script_content" | grep -qE "$pattern"; then
-                    echo -e "${YELLOW}  ⚠ Suspicious $script_type script: ${CYAN}$script_content${NC}"
-                    found=1
-                    break
+    # Check if jq is available
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ⚠ Warning: jq not installed, using fallback grep method${NC}" >&2
+        # Fallback to grep
+        for script_type in "preinstall" "postinstall" "install"; do
+            if script_content=$(grep -o "\"$script_type\":[[:space:]]*\"[^\"]*\"" "$file" 2>/dev/null); then
+                for pattern in "${patterns[@]}"; do
+                    if echo "$script_content" | grep -qE "$pattern"; then
+                        echo -e "${YELLOW}  ⚠ Suspicious $script_type script: ${CYAN}$script_content${NC}"
+                        found=1
+                        break
+                    fi
+                done
+                if [ $VERBOSE -eq 1 ] && [ $found -eq 0 ]; then
+                    echo -e "${CYAN}  ℹ $script_type: $script_content${NC}"
                 fi
-            done
-
-            if [ $VERBOSE -eq 1 ] && [ $found -eq 0 ]; then
-                echo -e "${CYAN}  ℹ $script_type: $script_content${NC}"
             fi
+        done
+        return $found
+    fi
+
+    # Use jq to extract install scripts
+    for script_type in "preinstall" "postinstall" "install"; do
+        local script_content
+        script_content=$(jq -r ".scripts.${script_type} // empty" "$file" 2>/dev/null)
+
+        [ -z "$script_content" ] && continue
+
+        local is_suspicious=0
+        for pattern in "${patterns[@]}"; do
+            if echo "$script_content" | grep -qE "$pattern"; then
+                echo -e "${YELLOW}  ⚠ Suspicious $script_type script: ${CYAN}\"$script_content\"${NC}"
+                found=1
+                is_suspicious=1
+                break
+            fi
+        done
+
+        if [ $VERBOSE -eq 1 ] && [ $is_suspicious -eq 0 ]; then
+            echo -e "${CYAN}  ℹ $script_type: \"$script_content\"${NC}"
         fi
     done
 
