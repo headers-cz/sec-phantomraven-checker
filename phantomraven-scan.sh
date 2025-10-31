@@ -294,8 +294,6 @@ check_lock_file_urls() {
     local lock_type="$2"
     local found=0
 
-    [ $VERBOSE -eq 1 ] && echo -e "  ${CYAN}Checking URLs in $lock_type...${NC}"
-
     case "$lock_type" in
         package-lock.json)
             # Parse package-lock.json with jq if available
@@ -370,7 +368,7 @@ check_lock_file_urls() {
         pnpm-lock.yaml)
             # Parse pnpm-lock.yaml (format: tarball: https://... or resolution.tarball)
             while IFS= read -r line; do
-                if [[ $line =~ (tarball|resolution):[[:space:]]*(https?://[^,}\][:space:]]+) ]]; then
+                if [[ $line =~ (tarball|resolution):[[:space:]]*(https?://[^,}[:space:]]+) ]]; then
                     url="${BASH_REMATCH[2]}"
 
                     if [[ ! $url =~ registry\.npmjs\.org ]] && \
@@ -500,17 +498,29 @@ scan_project() {
         # Check lock files
         for lock in "package-lock.json" "yarn.lock" "pnpm-lock.yaml"; do
             local lock_file="$project_dir/$lock"
-            [ ! -f "$lock_file" ] && continue
 
-            [ $VERBOSE -eq 1 ] && echo -e "  ${CYAN}Checking $lock...${NC}"
+            if [ ! -f "$lock_file" ]; then
+                [ $VERBOSE -eq 1 ] && echo -e "  ${CYAN}Skipping $lock (not found)${NC}"
+                continue
+            fi
 
-            ! check_malicious_packages "$lock_file" "$lock" && project_has_issues=1
-            ! check_lock_file_urls "$lock_file" "$lock" && project_has_issues=1
+            echo -e "  ${CYAN}→ Checking $lock...${NC}"
+            local lock_has_issues=0
+
+            ! check_malicious_packages "$lock_file" "$lock" && lock_has_issues=1
+            ! check_lock_file_urls "$lock_file" "$lock" && lock_has_issues=1
 
             # Use -F for literal string matching - security fix
             if grep -qF "$MALICIOUS_DOMAIN" "$lock_file" 2>/dev/null; then
-                echo -e "${RED}  ✗ Malicious domain in $lock: ${YELLOW}$MALICIOUS_DOMAIN${NC}"
+                echo -e "${RED}    ✗ Malicious domain in $lock: ${YELLOW}$MALICIOUS_DOMAIN${NC}"
+                lock_has_issues=1
+            fi
+
+            if [ $lock_has_issues -eq 1 ]; then
+                echo -e "    ${YELLOW}! Issues found in $lock${NC}"
                 project_has_issues=1
+            else
+                echo -e "    ${GREEN}✓ $lock is clean${NC}"
             fi
         done
 
