@@ -100,9 +100,17 @@ stop_spinner() {
 # Cleanup on exit
 cleanup() {
     stop_spinner
-    tput cnorm 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+# Handle interrupt
+handle_interrupt() {
+    cleanup
+    echo -e "\n${YELLOW}Scan interrupted by user${NC}" >&2
+    exit 130
+}
+
+trap cleanup EXIT TERM HUP
+trap handle_interrupt INT
 
 show_help() {
     cat << EOF
@@ -499,7 +507,8 @@ scan_project() {
     echo ""
 
     # Find package.json files (exclude build directories)
-    start_spinner "Searching for package.json files..."
+    start_spinner "Searching for dependency files..."
+
     local package_files=()
     while IFS= read -r -d '' file; do
         package_files+=("$file")
@@ -511,6 +520,7 @@ scan_project() {
         -not -path "*/.nuxt/*" \
         -not -path "*/.output/*" \
         -print0 2>/dev/null)
+
     stop_spinner
 
     if [ ${#package_files[@]} -eq 0 ]; then
@@ -526,9 +536,8 @@ scan_project() {
         count=$((count + 1))
         local project_dir=$(dirname "$pkg_file")
         local project_has_issues=0
-        local percent=$((count * 100 / ${#package_files[@]}))
 
-        echo -e "${BLUE}[$count/${#package_files[@]}]${NC} ${CYAN}($percent%)${NC} Checking: ${GREEN}$pkg_file${NC}"
+        echo -e "${BLUE}[$count/${#package_files[@]}]${NC} Checking: ${GREEN}$pkg_file${NC}"
 
         # Run checks (functions return 1 if they found issues)
         ! check_malicious_packages "$pkg_file" && project_has_issues=1
