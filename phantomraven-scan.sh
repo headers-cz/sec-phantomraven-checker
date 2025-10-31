@@ -82,6 +82,7 @@ OPTIONS:
 WHAT IT CHECKS:
   • 126 known PhantomRaven malicious packages
   • Remote Dynamic Dependencies (HTTP/HTTPS URLs in dependencies)
+  • Suspicious URLs in lock files (transitive dependencies)
   • Suspicious Git dependencies (non-standard hosts)
   • Malicious domain: packages.storeartifact.com
   • Suspicious preinstall/postinstall/install scripts
@@ -286,6 +287,109 @@ check_remote_dependencies() {
     return $found
 }
 
+# Check for Remote Dynamic Dependencies in lock files
+# Returns 0 if clean, 1 if found issues
+check_lock_file_urls() {
+    local file="$1"
+    local lock_type="$2"
+    local found=0
+
+    [ $VERBOSE -eq 1 ] && echo -e "  ${CYAN}Checking URLs in $lock_type...${NC}"
+
+    case "$lock_type" in
+        package-lock.json)
+            # Parse package-lock.json with jq if available
+            if command -v jq >/dev/null 2>&1; then
+                local urls
+                urls=$(jq -r '
+                    .. |
+                    objects |
+                    select(has("resolved")) |
+                    .resolved // empty
+                ' "$file" 2>/dev/null) || return 0
+
+                while IFS= read -r url; do
+                    [ -z "$url" ] && continue
+
+                    # Skip npm registry and GitHub URLs
+                    if [[ $url =~ registry\.npmjs\.org ]] || \
+                       [[ $url =~ github\.com/[^/]+/[^/]+/(tarball|zipball) ]]; then
+                        continue
+                    fi
+
+                    # Check for HTTP/HTTPS URLs (excluding npm registry)
+                    if [[ $url =~ ^https?:// ]]; then
+                        echo -e "${RED}  ✗ Remote Dynamic Dependency in $lock_type: ${YELLOW}$url${NC}"
+                        found=1
+
+                        if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
+                            echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
+                        fi
+                    fi
+                done <<< "$urls"
+            else
+                # Fallback to grep
+                while IFS= read -r line; do
+                    if [[ $line =~ \"resolved\":[[:space:]]*\"(https?://[^\"]+)\" ]]; then
+                        url="${BASH_REMATCH[1]}"
+
+                        if [[ ! $url =~ registry\.npmjs\.org ]] && \
+                           [[ ! $url =~ github\.com/[^/]+/[^/]+/(tarball|zipball) ]]; then
+                            echo -e "${RED}  ✗ Remote Dynamic Dependency in $lock_type: ${YELLOW}$url${NC}"
+                            found=1
+
+                            if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
+                                echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
+                            fi
+                        fi
+                    fi
+                done < <(grep -E "\"resolved\":" "$file" 2>/dev/null || true)
+            fi
+            ;;
+
+        yarn.lock)
+            # Parse yarn.lock (format: resolved "https://...")
+            while IFS= read -r line; do
+                if [[ $line =~ resolved[[:space:]]+\"(https?://[^\"]+)\" ]]; then
+                    url="${BASH_REMATCH[1]}"
+
+                    if [[ ! $url =~ registry\.yarnpkg\.com ]] && \
+                       [[ ! $url =~ registry\.npmjs\.org ]] && \
+                       [[ ! $url =~ github\.com/[^/]+/[^/]+/(tarball|zipball) ]]; then
+                        echo -e "${RED}  ✗ Remote Dynamic Dependency in $lock_type: ${YELLOW}$url${NC}"
+                        found=1
+
+                        if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
+                            echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
+                        fi
+                    fi
+                fi
+            done < <(grep -E "^[[:space:]]*resolved " "$file" 2>/dev/null || true)
+            ;;
+
+        pnpm-lock.yaml)
+            # Parse pnpm-lock.yaml (format: tarball: https://... or resolution.tarball)
+            while IFS= read -r line; do
+                if [[ $line =~ (tarball|resolution):[[:space:]]*(https?://[^,}\][:space:]]+) ]]; then
+                    url="${BASH_REMATCH[2]}"
+
+                    if [[ ! $url =~ registry\.npmjs\.org ]] && \
+                       [[ ! $url =~ github\.com/[^/]+/[^/]+/(tarball|zipball) ]]; then
+                        echo -e "${RED}  ✗ Remote Dynamic Dependency in $lock_type: ${YELLOW}$url${NC}"
+                        found=1
+
+                        if [[ $url == *"$MALICIOUS_DOMAIN"* ]]; then
+                            echo -e "${RED}    ⚠ CRITICAL: Known malicious domain!${NC}"
+                        fi
+                    fi
+                fi
+            done < <(grep -E "(tarball|resolution):" "$file" 2>/dev/null || true)
+            ;;
+    esac
+
+    return $found
+}
+
 # Check for suspicious install scripts
 # Returns 0 if clean, 1 if found issues
 check_install_scripts() {
@@ -401,6 +505,7 @@ scan_project() {
             [ $VERBOSE -eq 1 ] && echo -e "  ${CYAN}Checking $lock...${NC}"
 
             ! check_malicious_packages "$lock_file" "$lock" && project_has_issues=1
+            ! check_lock_file_urls "$lock_file" "$lock" && project_has_issues=1
 
             # Use -F for literal string matching - security fix
             if grep -qF "$MALICIOUS_DOMAIN" "$lock_file" 2>/dev/null; then
