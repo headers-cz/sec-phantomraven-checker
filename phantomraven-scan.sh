@@ -16,6 +16,7 @@ NC='\033[0m'
 
 # Configuration
 VERBOSE=0
+SPINNER_PID=""
 
 # Known malicious packages (126 packages from PhantomRaven campaign)
 MALICIOUS_PACKAGES=(
@@ -66,6 +67,42 @@ MALICIOUS_PACKAGES=(
 # Known malicious infrastructure
 MALICIOUS_DOMAIN="packages.storeartifact.com"
 MALICIOUS_IP="54.173.15.59"
+
+# Spinner functions
+start_spinner() {
+    local message="$1"
+    local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+
+    (
+        while true; do
+            for ((i=0; i<${#spin_chars}; i++)); do
+                printf "\r${CYAN}${spin_chars:$i:1}${NC} $message" >&2
+                sleep 0.1
+            done
+        done
+    ) &
+    SPINNER_PID=$!
+    # Disable cursor
+    tput civis 2>/dev/null || true
+}
+
+stop_spinner() {
+    if [ -n "$SPINNER_PID" ] && kill -0 "$SPINNER_PID" 2>/dev/null; then
+        kill "$SPINNER_PID" 2>/dev/null
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+    fi
+    printf "\r\033[K" >&2  # Clear line
+    # Re-enable cursor
+    tput cnorm 2>/dev/null || true
+}
+
+# Cleanup on exit
+cleanup() {
+    stop_spinner
+    tput cnorm 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 show_help() {
     cat << EOF
@@ -462,6 +499,7 @@ scan_project() {
     echo ""
 
     # Find package.json files (exclude build directories)
+    start_spinner "Searching for package.json files..."
     local package_files=()
     while IFS= read -r -d '' file; do
         package_files+=("$file")
@@ -473,6 +511,7 @@ scan_project() {
         -not -path "*/.nuxt/*" \
         -not -path "*/.output/*" \
         -print0 2>/dev/null)
+    stop_spinner
 
     if [ ${#package_files[@]} -eq 0 ]; then
         echo -e "${YELLOW}No package.json files found${NC}"
@@ -487,8 +526,9 @@ scan_project() {
         count=$((count + 1))
         local project_dir=$(dirname "$pkg_file")
         local project_has_issues=0
+        local percent=$((count * 100 / ${#package_files[@]}))
 
-        echo -e "${BLUE}[$count/${#package_files[@]}]${NC} Checking: ${GREEN}$pkg_file${NC}"
+        echo -e "${BLUE}[$count/${#package_files[@]}]${NC} ${CYAN}($percent%)${NC} Checking: ${GREEN}$pkg_file${NC}"
 
         # Run checks (functions return 1 if they found issues)
         ! check_malicious_packages "$pkg_file" && project_has_issues=1
